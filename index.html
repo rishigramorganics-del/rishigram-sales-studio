@@ -315,7 +315,8 @@ const defaults = {
   products: ["A2 Deshi Cow Ghee", "Amla Murabba", "Toor Dal", "Black Turmeric",
     "Lakadong Turmeric", "Kasturi Turmeric", "Kalanamak Rice", "Sandalwood", "Casuarina", "Mahogany", "Black Mustard Oil"],
   units: ["pcs", "kg", "ml", "L"],
-  dispatchMethods: ["India Post", "Self Pickup"]
+  dispatchMethods: ["India Post", "Self Pickup"],
+  paymentMethods: ["Cash", "UPI", "Bank transfer", "Card", "COD", "Other"]
 };
 const money = value => value == null ? "" : new Intl.NumberFormat("en-IN", {
   style: "currency", currency: "INR", minimumFractionDigits: 0, maximumFractionDigits: 2
@@ -780,7 +781,7 @@ function openEntry(sale) {
   el("parse-note").textContent = "Check the extracted fields before saving.";
   el("paste-address").value = "";
   setSelect(field("channel"), options.channels, sale?.channel);
-  setSelect(field("paymentMethod"), paymentMethods, sale?.paymentMethod);
+  setSelect(field("paymentMethod"), options.paymentMethods, sale?.paymentMethod);
   setSelect(field("dispatchMethod"), options.dispatchMethods, sale?.dispatchMethod);
   el("sale-items").replaceChildren();
   for (const item of sale && saleItems(sale).length ? saleItems(sale) : [{}]) addSaleItem(item);
@@ -948,8 +949,6 @@ el("extract").onclick = extract;
 el("paste-address").addEventListener("paste", () => setTimeout(extract, 0));
 el("print-bill").onclick = () => window.print();
 el("print-postal-label").onclick = () => window.print();
-const paymentMethods = ["Cash", "UPI", "Bank transfer", "Card", "COD", "Other"];
-
 function parseSalesWorkbook(book, xlsx) {
   function rows(name, required) {
     const sheet = book.Sheets[name];
@@ -1345,7 +1344,7 @@ if (configured) {
       <article id="recent-panel" class="panel"><div class="section-head"><h3>Recent sales</h3><button class="secondary" data-view="sales">View ledger</button></div><div id="recent"></div></article>
     </section>
     <section id="sales" class="panel" hidden><div class="section-head"><h3>All sales</h3><div class="excel-actions"><button class="secondary" id="import-excel" type="button" disabled>↑ Import Excel</button><input id="import-file" type="file" accept=".xlsx" hidden><a id="export" class="secondary" download aria-disabled="true">↓ Download Excel</a></div></div><p id="import-status" class="muted" role="status"></p><p id="export-status" class="muted" role="status" hidden></p><div class="filters"><label>Search<input id="search" type="search" placeholder="Order, customer, phone or product"></label><label>Payment status<select id="status"><option value="">All payments</option><option>Paid</option><option>Part paid</option><option>Unpaid</option></select></label></div><div id="ledger"></div></section>
-    <section id="settings" class="panel" hidden><h3>Dropdown options</h3><p class="muted">Use one option per line. Changes apply to future selections. Saved entries retain their original labels.</p><form id="settings-form"><div class="settings-grid"><label>Order sources<textarea name="channels" required rows="10"></textarea></label><label>Products<textarea name="products" required rows="10"></textarea></label><label>Quantity units<textarea name="units" required rows="10"></textarea></label><label>Dispatch methods<textarea name="dispatchMethods" required rows="10"></textarea></label></div><button class="primary">Save dropdown settings</button></form></section>
+    <section id="settings" class="panel" hidden><h3>Dropdown options</h3><p class="muted">Use one option per line. Changes apply to future selections. Saved entries retain their original labels.</p><form id="settings-form"><div class="settings-grid"><label>Order sources<textarea name="channels" required rows="10"></textarea></label><label>Products<textarea name="products" required rows="10"></textarea></label><label>Quantity units<textarea name="units" required rows="10"></textarea></label><label>Dispatch methods<textarea name="dispatchMethods" required rows="10"></textarea></label><label>Payment methods<textarea name="paymentMethods" required rows="10"></textarea></label></div><button class="primary">Save dropdown settings</button></form></section>
   </main>
 </div>
 <dialog id="entry">
