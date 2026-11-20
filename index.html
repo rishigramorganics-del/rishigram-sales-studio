@@ -129,6 +129,8 @@ footer span:empty { display: none; }
 
 #export { display: inline-flex; align-items: center; text-decoration: none; font-weight: 650; }
 #export:focus-visible { outline: 3px solid #9d8040; outline-offset: 2px; }
+.excel-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+#import-status:empty { display: none; }
 #export-status { margin-bottom: 8px; }
 
 #export[aria-disabled="true"] { opacity: .55; cursor: default; }
@@ -266,6 +268,22 @@ async function connect(config, ownerUid) {
     }, error),
     watchOptions: (callback, error) => fs.onSnapshot(options(), snap => callback(snap.data()), error),
     saveOptions: value => fs.setDoc(options(), value),
+    importSales(entries) {
+      const counter = fs.doc(root(), "meta", "counter");
+      const targets = entries.map(({ id }) => fs.doc(sales(), id));
+      return fs.runTransaction(db, async tx => {
+        const [last, ...existing] = await Promise.all([counter, ...targets].map(ref => tx.get(ref)));
+        let serial = last.data()?.last ?? 0;
+        let saved = 0;
+        entries.forEach(({ value }, index) => {
+          if (existing[index].exists()) return;
+          tx.set(targets[index], { ...value, serial: ++serial, revision: 1 });
+          saved += 1;
+        });
+        if (saved) tx.set(counter, { last: serial });
+        return saved;
+      });
+    },
     saveSale(value, existing) {
       const target = existing ? fs.doc(sales(), existing.id) : fs.doc(sales());
       if (existing) {
@@ -299,10 +317,10 @@ const defaults = {
   units: ["pcs", "kg", "ml", "L"],
   dispatchMethods: ["India Post", "Self Pickup"]
 };
-const money = value => new Intl.NumberFormat("en-IN", {
+const money = value => value == null ? "" : new Intl.NumberFormat("en-IN", {
   style: "currency", currency: "INR", minimumFractionDigits: 0, maximumFractionDigits: 2
 }).format(value / 100);
-const paymentStatus = sale => sale.total === sale.paid ? "Paid" : sale.paid > 0 ? "Part paid" : "Unpaid";
+const paymentStatus = sale => sale.total == null || sale.paid == null ? "" : sale.total === sale.paid ? "Paid" : sale.paid > 0 ? "Part paid" : "Unpaid";
 const dateKey = (date = new Date()) => new Intl.DateTimeFormat("en-CA", {
   timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit"
 }).format(date);
@@ -351,7 +369,7 @@ function quantityInReport(quantity, unit) {
 
 // Older orders stored one product directly on the sale record.
 function saleItems(sale) {
-  if (Array.isArray(sale.items) && sale.items.length) return sale.items;
+  if (Array.isArray(sale.items)) return sale.items;
   const { product, quantity, unit, unitPrice, total } = sale;
   return [{ product, quantity, unit, unitPrice, total }];
 }
@@ -423,20 +441,21 @@ function worksheet(rows) {
 }
 
 function workbook(sales) {
+  const rupees = value => value == null ? "" : value / 100;
   const orders = [["Sr. no.", "Order no.", "Order date", "Order from", "Customer name", "Phone", "PIN code",
     "Address", "Products", "Total (INR)", "Paid (INR)", "Balance (INR)", "Payment status", "Remarks", "Dispatch method", "Consignment number", "Dispatched on",
-    "Delivered on", "Delivery days", "Dispatch cost (INR)", "Other charge (INR)", "Total dispatch charge (INR)"],
+    "Delivered on", "Delivery days", "Dispatch cost (INR)", "Other charge (INR)", "Total dispatch charge (INR)", "Payment method"],
     ...sales.map(sale => [sale.serial, sale.orderNo, sale.date, sale.channel, sale.customer,
-      sale.phone, sale.pin, sale.address, saleItems(sale).map(item => `${item.product} · ${item.quantity} ${item.unit}`).join("; "),
-      sale.total / 100, sale.paid / 100, (sale.total - sale.paid) / 100, paymentStatus(sale), sale.remarks,
+      sale.phone, sale.pin, sale.address, sale.productsSummary || saleItems(sale).map(item => [item.product, [item.quantity, item.unit].filter(value => value != null && value !== "").join(" ")].filter(Boolean).join(" · ")).join("; "),
+      rupees(sale.total), rupees(sale.paid), rupees(saleBalance(sale)), paymentStatus(sale), sale.remarks,
       sale.dispatchMethod, sale.consignmentNo, sale.dispatchedOn, sale.deliveredOn,
       deliveryDays(sale.dispatchedOn, sale.deliveredOn),
       sale.dispatchCost == null ? "" : sale.dispatchCost / 100,
       sale.otherCharge == null ? "" : sale.otherCharge / 100,
-      sale.dispatchCost == null && sale.otherCharge == null ? "" : ((sale.dispatchCost ?? 0) + (sale.otherCharge ?? 0)) / 100])];
+      sale.dispatchCost == null && sale.otherCharge == null ? "" : ((sale.dispatchCost ?? 0) + (sale.otherCharge ?? 0)) / 100, sale.paymentMethod])];
   const items = [["Sr. no.", "Order no.", "Order date", "Product", "Quantity", "Unit", "Unit price (INR)", "Amount (INR)"],
     ...sales.flatMap(sale => saleItems(sale).map(item => [sale.serial, sale.orderNo, sale.date,
-      item.product, item.quantity, item.unit, item.unitPrice / 100, item.total / 100]))];
+      item.product, item.quantity, item.unit, rupees(item.unitPrice), rupees(item.total)]))];
   return zip({
     "[Content_Types].xml": `<Types xmlns="${ns}/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`,
     "_rels/.rels": `<Relationships xmlns="${ns}/package/2006/relationships"><Relationship Id="rId1" Type="${ns}/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
@@ -478,7 +497,8 @@ function cashMemoDocument(sale) {
     itemTable,
     paragraph(`Total ${money(sale.total)}`),
     paragraph(`Received ${money(sale.paid)}`),
-    paragraph(`Balance ${money(sale.total - sale.paid)}`, { bold: true }),
+    sale.paymentMethod ? paragraph(`Payment method: ${sale.paymentMethod}`) : "",
+    paragraph(`Balance ${money(saleBalance(sale))}`, { bold: true }),
     sale.remarks ? paragraph("Remarks", { bold: true }) + paragraph(sale.remarks) : ""
   ].join("");
   return wordDocument(body);
@@ -500,6 +520,8 @@ return { workbook, cashMemoDocument, postalAddressDocument };
 })();
 
 const h = escapeHtml;
+const saleBalance = sale => sale.total == null || sale.paid == null ? null : sale.total - sale.paid;
+let workspaceSession = 0;
 
 const el = id => document.getElementById(id);
 const form = el("sale-form");
@@ -531,6 +553,7 @@ function showDataError(error) {
 }
 function updateReady() {
   el("new-sale").disabled = !readySales || !readyOptions;
+  el("import-excel").disabled = importing || !readySales || !readyOptions;
   settings.querySelector("button").disabled = !readyOptions;
 }
 function showView(view) {
@@ -559,7 +582,7 @@ function dashboardSales() {
   }
   const now = dateKey();
   const cutoff = dateKey(new Date(Date.now() - 29 * 86400000));
-  return sales.filter(sale => sale.date <= now && (period === "month"
+  return sales.filter(sale => sale.date && sale.date <= now && (period === "month"
     ? sale.date.startsWith(now.slice(0, 7)) : sale.date >= cutoff));
 }
 function updateReportFilters() {
@@ -586,8 +609,10 @@ function renderProductTotals(rows) {
   for (const row of rows) {
     if (!groups.has(row.product)) groups.set(row.product, { units: new Map(), entries: 0 });
     const group = groups.get(row.product);
-    const { unit, micro } = quantityInReport(row.quantity, row.unit);
-    group.units.set(unit, (group.units.get(unit) || 0) + micro);
+    if (row.quantity != null && row.unit) {
+      const { unit, micro } = quantityInReport(row.quantity, row.unit);
+      group.units.set(unit, (group.units.get(unit) || 0) + micro);
+    }
     group.entries += 1;
   }
   const sorted = [...groups].sort(([a], [b]) => a.localeCompare(b));
@@ -604,7 +629,7 @@ function ledgerSales() {
   const search = el("search").value.trim().toLowerCase();
   const status = el("status").value;
   return sales.filter(sale => (!status || paymentStatus(sale) === status)
-    && [sale.orderNo, sale.customer, sale.phone, sale.dispatchMethod, sale.consignmentNo, ...saleItems(sale).map(item => item.product)].some(value => String(value ?? "").toLowerCase().includes(search)));
+    && [sale.orderNo, sale.customer, sale.phone, sale.paymentMethod, sale.dispatchMethod, sale.consignmentNo, ...saleItems(sale).map(item => item.product)].some(value => String(value ?? "").toLowerCase().includes(search)));
 }
 function dispatchDetails(sale) {
   const days = deliveryDays(sale.dispatchedOn, sale.deliveredOn);
@@ -629,8 +654,8 @@ function table(rows, showDispatch = false) {
     ${rows.map(sale => {
       const status = paymentStatus(sale);
       return `<tr><td>${h(sale.serial)}</td><td><strong>${h(sale.orderNo)}</strong><br><small>${h(sale.date)} · ${h(sale.channel)}</small></td><td>${h(sale.customer)}</td>
-      <td>${saleItems(sale).map(item => `<div class="ledger-item">${h(item.product)} <small>· ${h(item.quantity)} ${h(item.unit)}</small></div>`).join("")}</td><td class="money">${money(sale.total)}</td><td class="money">${money(sale.total - sale.paid)}</td>
-      <td><span class="pill ${status.toLowerCase().replaceAll(" ", "-")}">${status}</span></td>${showDispatch ? `<td class="dispatch-details">${dispatchDetails(sale)}</td>` : ""}<td class="actions"><button type="button" class="secondary" data-edit="${h(sale.id)}">Edit</button><button type="button" class="secondary" data-bill="${h(sale.id)}">Bill</button><button type="button" class="secondary" data-address-label="${h(sale.id)}">Print address</button></td></tr>`;
+      <td>${h(sale.productsSummary)}${saleItems(sale).map(item => `<div class="ledger-item">${h(item.product)} <small>· ${h(item.quantity)} ${h(item.unit)}</small></div>`).join("")}</td><td class="money">${money(sale.total)}</td><td class="money">${money(saleBalance(sale))}</td>
+      <td><span class="pill ${status.toLowerCase().replaceAll(" ", "-")}">${status}</span>${sale.paymentMethod ? `<div><small>${h(sale.paymentMethod)}</small></div>` : ""}</td>${showDispatch ? `<td class="dispatch-details">${dispatchDetails(sale)}</td>` : ""}<td class="actions"><button type="button" class="secondary" data-edit="${h(sale.id)}">Edit</button><button type="button" class="secondary" data-bill="${h(sale.id)}">Bill</button><button type="button" class="secondary" data-address-label="${h(sale.id)}">Print address</button></td></tr>`;
     }).join("")}</tbody></table></div>`;
 }
 function groupTotals(rows, key, amount) {
@@ -649,24 +674,24 @@ function refreshLedger() {
 function render() {
   const productFilter = el("report-product");
   const selected = productFilter.value;
-  const names = [...new Set([...options.products, ...sales.flatMap(row => saleItems(row).map(item => item.product))])].sort((a, b) => a.localeCompare(b));
+  const names = [...new Set([...options.products, ...sales.flatMap(row => saleItems(row).map(item => item.product).filter(Boolean))])].sort((a, b) => a.localeCompare(b));
   productFilter.replaceChildren(new Option("All products", ""), ...names.map(name => new Option(name, name)));
   productFilter.value = names.includes(selected) ? selected : "";
   const isProductView = currentView === "products";
   const productMatches = item => !productFilter.value || item.product === productFilter.value;
   const periodRows = dashboardSales();
   const rows = isProductView ? periodRows.filter(row => saleItems(row).some(productMatches)) : periodRows;
-  if (isProductView) renderProductTotals(rows.flatMap(saleItems).filter(productMatches));
+  if (isProductView) renderProductTotals(rows.flatMap(saleItems).filter(item => item.product && productMatches(item)));
   const gross = rows.reduce((sum, row) => sum + row.total, 0);
   const paid = rows.reduce((sum, row) => sum + row.paid, 0);
   el("gross").textContent = money(gross);
   el("received").textContent = money(paid);
-  el("due").textContent = money(gross - paid);
+  el("due").textContent = money(rows.reduce((sum, row) => sum + (saleBalance(row) ?? 0), 0));
   el("count").textContent = rows.length;
   el("recent").innerHTML = table(rows.slice(0, 5));
-  const amount = isProductView ? () => 1 : row => row.total;
+  const amount = isProductView ? () => 1 : row => row.total ?? 0;
   const formatMetric = isProductView ? value => String(value) : money;
-  const months = groupTotals(rows, row => row.date.slice(0, 7), amount)
+  const months = groupTotals(rows.filter(row => row.date), row => row.date.slice(0, 7), amount)
     .sort(([a], [b]) => a.localeCompare(b)).slice(-6);
   const max = Math.max(1, ...months.map(([, total]) => total));
   const scale = 10 ** Math.floor(Math.log10(max));
@@ -718,6 +743,8 @@ function openStudio(label) {
   el("page-title").focus();
 }
 function closeStudio() {
+  workspaceSession += 1;
+  el("import-status").textContent = "";
   const wasOpen = !el("studio").hidden;
   subscriptions.forEach(stop => stop());
   subscriptions = [];
@@ -753,18 +780,21 @@ function openEntry(sale) {
   el("parse-note").textContent = "Check the extracted fields before saving.";
   el("paste-address").value = "";
   setSelect(field("channel"), options.channels, sale?.channel);
+  setSelect(field("paymentMethod"), paymentMethods, sale?.paymentMethod);
   setSelect(field("dispatchMethod"), options.dispatchMethods, sale?.dispatchMethod);
   el("sale-items").replaceChildren();
-  for (const item of sale ? saleItems(sale) : [{}]) addSaleItem(item);
+  for (const item of sale && saleItems(sale).length ? saleItems(sale) : [{}]) addSaleItem(item);
   updateItemControls();
-  field("date").value = sale?.date || dateKey();
+  field("date").value = sale ? sale.date : dateKey();
+  const partial = Boolean(sale?.id.startsWith("import-"));
+  for (const name of ["orderNo", "channel", "date", "customer"]) field(name).required = !partial;
   for (const name of ["serial", "orderNo", "customer", "phone", "pin", "address", "remarks", "consignmentNo", "dispatchedOn", "deliveredOn"]) {
     field(name).value = sale?.[name] ?? "";
   }
   for (const name of ["dispatchCost", "otherCharge"]) {
     field(name).value = sale?.[name] == null ? "" : (sale[name] / 100).toFixed(2);
   }
-  field("paid").value = sale ? (sale.paid / 100).toFixed(2) : "0";
+  field("paid").value = sale ? (sale.paid == null ? "" : (sale.paid / 100).toFixed(2)) : "0";
   calculate();
   el("entry").showModal();
 }
@@ -774,6 +804,9 @@ function addSaleItem(item) {
   const input = name => row.querySelector(`[data-item="${name}"]`);
   setSelect(input("product"), options.products, item.product);
   setSelect(input("unit"), options.units, item.unit);
+  if (editing?.id.startsWith("import-")) {
+    for (const name of ["product", "quantity", "unit", "unitPrice"]) input(name).required = false;
+  }
   input("quantity").value = item.quantity ?? "";
   input("unitPrice").value = item.unitPrice == null ? "" : (item.unitPrice / 100).toFixed(2);
   el("sale-items").append(row);
@@ -788,19 +821,25 @@ function updateItemControls() {
   });
 }
 function calculate() {
+  const partial = Boolean(editing?.id.startsWith("import-"));
   const items = [...el("sale-items").children].map(row => {
     const input = name => row.querySelector(`[data-item="${name}"]`);
-    const quantity = Number(input("quantity").value);
-    const unitPrice = Math.round(Number(input("unitPrice").value) * 100);
-    const total = lineTotal(quantity, unitPrice);
+    const quantity = input("quantity").value === "" ? null : Number(input("quantity").value);
+    const unitPrice = input("unitPrice").value === "" ? null : Math.round(Number(input("unitPrice").value) * 100);
+    const total = quantity == null || unitPrice == null ? null : lineTotal(quantity, unitPrice);
     input("amount").value = money(total);
     return { product: input("product").value, quantity, unit: input("unit").value, unitPrice, total };
-  });
-  const total = items.reduce((sum, item) => sum + item.total, 0);
-  const paid = Math.round(Number(field("paid").value) * 100);
-  field("total").value = (total / 100).toFixed(2);
-  field("balance").value = ((total - paid) / 100).toFixed(2);
-  field("paid").setCustomValidity(paid > total ? "Payment cannot exceed the sale total." : "");
+  }).filter(item => !partial || item.product || item.unit || item.quantity != null || item.unitPrice != null);
+  const previousItems = partial ? saleItems(editing) : [];
+  const sameItems = partial && previousItems.length === items.length && items.every((item, index) =>
+    ["product", "unit", "quantity", "unitPrice"].every(key => item[key] === previousItems[index][key]));
+  if (sameItems) items.forEach((item, index) => { item.total = previousItems[index].total; });
+  const total = sameItems ? editing.total : items.length && items.every(item => item.total != null)
+    ? items.reduce((sum, item) => sum + item.total, 0) : null;
+  const paid = chargeInPaise("paid");
+  field("total").value = total == null ? "" : (total / 100).toFixed(2);
+  field("balance").value = total == null || paid == null ? "" : ((total - paid) / 100).toFixed(2);
+  field("paid").setCustomValidity(total != null && paid != null && paid > total ? "Payment cannot exceed the sale total." : "");
   const dispatchedOn = field("dispatchedOn").value;
   const deliveredOn = field("deliveredOn").value;
   const days = deliveryDays(dispatchedOn, deliveredOn);
@@ -811,7 +850,7 @@ function calculate() {
   const otherCharge = chargeInPaise("otherCharge");
   field("dispatchTotal").value = dispatchCost == null && otherCharge == null
     ? "" : (((dispatchCost ?? 0) + (otherCharge ?? 0)) / 100).toFixed(2);
-  return { items, paid, total, dispatchCost, otherCharge };
+  return { items, paid, total, dispatchCost, otherCharge, productsSummary: items.length ? "" : editing?.productsSummary ?? "" };
 }
 function chargeInPaise(name) {
   const value = field(name).value;
@@ -856,7 +895,7 @@ function bill(sale) {
     <div><p class="eyebrow">BILLED TO</p><strong>${h(sale.customer)}</strong><p>${h([sale.address, sale.pin].filter(Boolean).join(" · "))}</p><p>${h(sale.phone)}</p></div>
     <table><thead><tr><th>Product</th><th>Quantity</th><th>Unit price</th><th>Amount</th></tr></thead><tbody>
     ${saleItems(sale).map(item => `<tr><td>${h(item.product)}</td><td>${h(item.quantity)} ${h(item.unit)}</td><td>${money(item.unitPrice)}</td><td>${money(item.total)}</td></tr>`).join("")}</tbody></table>
-    <div class="bill-totals"><p>Total ${money(sale.total)}</p><p>Received ${money(sale.paid)}</p><strong>Balance ${money(sale.total - sale.paid)}</strong></div>
+    <div class="bill-totals"><p>Total ${money(sale.total)}</p><p>Received ${money(sale.paid)}</p>${sale.paymentMethod ? `<p>Payment method: ${h(sale.paymentMethod)}</p>` : ""}<strong>Balance ${money(saleBalance(sale))}</strong></div>
     ${sale.remarks ? `<div><strong>Remarks</strong><p>${h(sale.remarks)}</p></div>` : ""}</article>`;
   const download = el("download-word");
   if (cashMemoUrl) URL.revokeObjectURL(cashMemoUrl);
@@ -909,6 +948,177 @@ el("extract").onclick = extract;
 el("paste-address").addEventListener("paste", () => setTimeout(extract, 0));
 el("print-bill").onclick = () => window.print();
 el("print-postal-label").onclick = () => window.print();
+const paymentMethods = ["Cash", "UPI", "Bank transfer", "Card", "COD", "Other"];
+
+function parseSalesWorkbook(book, xlsx) {
+  function rows(name, required) {
+    const sheet = book.Sheets[name];
+    if (!sheet) throw new Error(`Missing sheet: ${name}.`);
+    if (sheet["!fullref"] || (sheet["!ref"] && xlsx.utils.decode_range(sheet["!ref"]).e.c >= 64)) {
+      throw new Error(`${name} exceeds the supported worksheet size.`);
+    }
+    const [header = [], ...data] = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: "", blankrows: true });
+    const headers = header.map(value => String(value).trim());
+    for (const label of required) {
+      if (!headers.includes(label)) throw new Error(`${name} is missing the “${label}” column.`);
+    }
+    return data.map((cells, index) => ({
+      row: index + 2,
+      values: Object.fromEntries(headers.map((label, column) => [label, cells[column] ?? ""]))
+    }));
+  }
+  const text = value => String(value ?? "").trim();
+  const hasData = (values, ignored) => Object.entries(values).some(([key, value]) => !ignored.includes(key) && text(value) !== "");
+  function number(value, label) {
+    if (!text(value)) return null;
+    const result = Number(typeof value === "string" ? value.replace(/^₹\s*/, "").replaceAll(",", "") : value);
+    if (!Number.isFinite(result) || result < 0 || result > Number.MAX_SAFE_INTEGER / 100) {
+      throw new Error(`${label} must be a valid, nonnegative number.`);
+    }
+    return result;
+  }
+  function cents(value, label) {
+    const result = number(value, label);
+    return result == null ? null : Math.round(result * 100);
+  }
+  function date(value, label) {
+    if (!text(value)) return "";
+    if (typeof value === "number") {
+      const parsed = xlsx.SSF.parse_date_code(value, { date1904: book.Workbook?.WBProps?.date1904 });
+      if (parsed) value = [parsed.y, parsed.m, parsed.d].map((part, i) => String(part).padStart(i ? 2 : 4, "0")).join("-");
+    }
+    const raw = text(value);
+    const indian = /^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/.exec(raw);
+    const iso = indian ? `${indian[3]}-${indian[2].padStart(2, "0")}-${indian[1].padStart(2, "0")}` : raw;
+    const milliseconds = Date.parse(iso);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso) || !Number.isFinite(milliseconds) || new Date(milliseconds).toISOString().slice(0, 10) !== iso) {
+      throw new Error(`${label} must be an Excel date, YYYY-MM-DD or DD-MM-YYYY.`);
+    }
+    return iso;
+  }
+  const orderRows = rows("Sales Ledger", ["Sr. no.", "Order no.", "Order date", "Customer name", "Paid (INR)"]);
+  const itemRows = rows("Order Items", ["Sr. no.", "Order no.", "Product", "Quantity", "Unit", "Unit price (INR)"]);
+  const records = orderRows.filter(({ values }) => hasData(values, ["Sr. no.", "Balance (INR)", "Payment status", "Delivery days", "Total dispatch charge (INR)"]))
+    .map(({ row, values: v }) => {
+      const label = `Sales Ledger row ${row}`;
+      return { row, serial: text(v["Sr. no."]), sale: {
+        orderNo: text(v["Order no."]), date: date(v["Order date"], `${label} order date`), channel: text(v["Order from"]),
+        customer: text(v["Customer name"]), phone: text(v.Phone), pin: text(v["PIN code"]), address: text(v.Address),
+        total: cents(v["Total (INR)"], `${label} total`), paid: cents(v["Paid (INR)"], `${label} paid`),
+        paymentMethod: text(v["Payment method"]), remarks: text(v.Remarks),
+        dispatchMethod: text(v["Dispatch method"]), consignmentNo: text(v["Consignment number"]),
+        dispatchedOn: date(v["Dispatched on"], `${label} dispatch date`), deliveredOn: date(v["Delivered on"], `${label} delivery date`),
+        dispatchCost: cents(v["Dispatch cost (INR)"], `${label} dispatch cost`),
+        otherCharge: cents(v["Other charge (INR)"], `${label} other charge`), items: []
+      }};
+    });
+  if (!records.length) throw new Error("Sales Ledger has no rows to import.");
+  if (records.length > 200) throw new Error("Import up to 200 sales per file. Split larger files into smaller ones.");
+  for (const { row, values: v } of itemRows) {
+    if (!hasData(v, ["Sr. no.", "Order no.", "Order date"])) continue;
+    const label = `Order Items row ${row}`;
+    const serial = text(v["Sr. no."]);
+    const order = text(v["Order no."]);
+    const orderDate = date(v["Order date"], `${label} order date`);
+    const matches = records.filter(record => (serial || order)
+      && (!serial || record.serial === serial)
+      && (!order || record.sale.orderNo === order)
+      && (!orderDate || record.sale.date === orderDate));
+    if (matches.length !== 1) throw new Error(`${label} needs a unique matching Sr. no. or Order no. in Sales Ledger.`);
+    const quantity = number(v.Quantity, `${label} quantity`);
+    const unitPrice = cents(v["Unit price (INR)"], `${label} unit price`);
+    const total = cents(v["Amount (INR)"], `${label} amount`);
+    matches[0].sale.items.push({ product: text(v.Product), quantity, unit: text(v.Unit), unitPrice, total });
+  }
+  return records.map(({ row, sale }) => {
+    if (sale.items.length > maxItems) throw new Error(`Sales Ledger row ${row} exceeds ${maxItems} items.`);
+    sale.productsSummary = sale.items.length ? "" : text(orderRows[row - 2].values.Products);
+    if (sale.total != null && sale.paid != null && sale.paid > sale.total) {
+      throw new Error(`Sales Ledger row ${row}: payment exceeds the sale total.`);
+    }
+    return sale;
+  });
+}
+
+async function importKey(sale) {
+  const fields = ["orderNo", "date", "channel", "customer", "phone", "pin", "address", "total", "paid", "paymentMethod",
+    "remarks", "dispatchMethod", "consignmentNo", "dispatchedOn", "deliveredOn", "dispatchCost", "otherCharge", "productsSummary"];
+  const items = saleItems(sale).map(item => [item.product || "", item.quantity ?? null, item.unit || "", item.unitPrice ?? null, item.total ?? null]);
+  const data = JSON.stringify([fields.map(key => sale[key] ?? (["total", "paid", "dispatchCost", "otherCharge"].includes(key) ? null : "")), items]);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(data));
+  return "import-" + Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+let spreadsheetLoader;
+function loadSpreadsheetReader() {
+  spreadsheetLoader ??= new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js";
+    script.onload = () => resolve(window.XLSX);
+    script.onerror = () => {
+      script.remove();
+      spreadsheetLoader = undefined;
+      reject(new Error("Excel reader failed to load. Check your connection and retry."));
+    };
+    document.head.append(script);
+  });
+  return spreadsheetLoader;
+}
+
+let importing = false;
+el("import-excel").onclick = () => el("import-file").click();
+el("import-file").onchange = async event => {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (!file || importing) return;
+  importing = true;
+  updateReady();
+  const status = el("import-status");
+  const session = workspaceSession;
+  status.textContent = "Reading workbook…";
+  try {
+    if (!/\.xlsx$/i.test(file.name) || file.size > 5000000) throw new Error("Choose an .xlsx file up to 5 MB.");
+    const xlsx = await loadSpreadsheetReader();
+    const book = xlsx.read(await file.arrayBuffer(), { dense: true, cellDates: false, sheetRows: 10201 });
+    const imported = parseSalesWorkbook(book, xlsx);
+    if (workspaceSession !== session) return;
+    const existing = new Set(await Promise.all(sales.map(importKey)));
+    const entries = [];
+    for (const value of imported) {
+      const id = await importKey(value);
+      if (existing.has(id) || sales.some(sale => sale.id === id)) continue;
+      existing.add(id);
+      entries.push({ id, value });
+    }
+    if (workspaceSession !== session) return;
+    const skipped = imported.length - entries.length;
+    if (!entries.length) {
+      status.textContent = "No new sales to import. Matching entries were skipped.";
+      return;
+    }
+    if (!window.confirm(`Import ${entries.length} new sales? ${skipped} matching rows will be skipped.`)) {
+      status.textContent = "Import cancelled.";
+      return;
+    }
+    let saved;
+    if (demo) {
+      const last = sales[0]?.serial ?? 0;
+      const updated = [...entries.map(({ id, value }, i) => ({ ...value, id, serial: last + i + 1 })), ...sales];
+      sessionStorage.setItem("rishigram-demo-sales", JSON.stringify(updated));
+      loadSales(updated);
+      saved = entries.length;
+    } else {
+      saved = await store.importSales(entries);
+    }
+    if (workspaceSession === session) status.textContent = `Imported ${saved} sales. Skipped ${imported.length - saved} matching rows.`;
+  } catch (error) {
+    if (workspaceSession === session) status.textContent = `Import failed. ${error.message}`;
+  } finally {
+    importing = false;
+    updateReady();
+  }
+};
+
 function exportMessage(message) {
   el("export-status").textContent = message;
   el("export-status").hidden = !message;
@@ -919,16 +1129,12 @@ function prepareExcelExport() {
   const link = el("export");
   link.removeAttribute("href");
   link.setAttribute("aria-disabled", "true");
-  if (!sales.length) {
-    exportMessage("There are no saved sales to export.");
-    return;
-  }
   try {
     excelUrl = URL.createObjectURL(workbook(sales));
     link.href = excelUrl;
     link.download = `Rishigram-Sales-${dateKey()}.xlsx`;
     link.removeAttribute("aria-disabled");
-    exportMessage(`Excel export includes all ${sales.length} saved sales entries.`);
+    exportMessage(sales.length ? `Excel export includes all ${sales.length} saved sales entries.` : "Download Excel for a blank import template.");
   } catch (error) {
     exportMessage("Excel export could not be prepared. Reload the page and try again.");
     console.error(error);
@@ -939,7 +1145,7 @@ form.addEventListener("submit", async event => {
   event.preventDefault();
   const values = calculate();
   if (!form.reportValidity()) return;
-  for (const name of ["orderNo", "customer"]) {
+  for (const name of editing?.id.startsWith("import-") ? [] : ["orderNo", "customer"]) {
     if (!field(name).value.trim()) {
       el("sale-error").textContent = "Enter the order number and customer name.";
       field(name).focus();
@@ -948,7 +1154,7 @@ form.addEventListener("submit", async event => {
   }
   const value = { ...values };
   for (const name of ["orderNo", "channel", "date", "customer", "phone", "pin", "address", "remarks",
-    "dispatchMethod", "consignmentNo", "dispatchedOn", "deliveredOn"]) {
+    "paymentMethod", "dispatchMethod", "consignmentNo", "dispatchedOn", "deliveredOn"]) {
     value[name] = field(name).value.trim();
   }
   const button = el("save-sale");
@@ -1138,7 +1344,7 @@ if (configured) {
       <div class="analytics"><article class="panel"><h3>Sales trend</h3><p class="muted" id="trend-description">Order value by month</p><div id="trend"></div></article><article class="panel"><h3>Order sources</h3><p class="muted" id="sources-description">Share of recorded sales by value</p><div id="sources"></div></article></div>
       <article id="recent-panel" class="panel"><div class="section-head"><h3>Recent sales</h3><button class="secondary" data-view="sales">View ledger</button></div><div id="recent"></div></article>
     </section>
-    <section id="sales" class="panel" hidden><div class="section-head"><h3>All sales</h3><a id="export" class="secondary" download aria-disabled="true">↓ Download Excel</a></div><p id="export-status" class="muted" role="status" hidden></p><div class="filters"><label>Search<input id="search" type="search" placeholder="Order, customer, phone or product"></label><label>Payment status<select id="status"><option value="">All payments</option><option>Paid</option><option>Part paid</option><option>Unpaid</option></select></label></div><div id="ledger"></div></section>
+    <section id="sales" class="panel" hidden><div class="section-head"><h3>All sales</h3><div class="excel-actions"><button class="secondary" id="import-excel" type="button" disabled>↑ Import Excel</button><input id="import-file" type="file" accept=".xlsx" hidden><a id="export" class="secondary" download aria-disabled="true">↓ Download Excel</a></div></div><p id="import-status" class="muted" role="status"></p><p id="export-status" class="muted" role="status" hidden></p><div class="filters"><label>Search<input id="search" type="search" placeholder="Order, customer, phone or product"></label><label>Payment status<select id="status"><option value="">All payments</option><option>Paid</option><option>Part paid</option><option>Unpaid</option></select></label></div><div id="ledger"></div></section>
     <section id="settings" class="panel" hidden><h3>Dropdown options</h3><p class="muted">Use one option per line. Changes apply to future selections. Saved entries retain their original labels.</p><form id="settings-form"><div class="settings-grid"><label>Order sources<textarea name="channels" required rows="10"></textarea></label><label>Products<textarea name="products" required rows="10"></textarea></label><label>Quantity units<textarea name="units" required rows="10"></textarea></label><label>Dispatch methods<textarea name="dispatchMethods" required rows="10"></textarea></label></div><button class="primary">Save dropdown settings</button></form></section>
   </main>
 </div>
@@ -1172,7 +1378,7 @@ if (configured) {
         <label>Total dispatch charge (₹)<input name="dispatchTotal" readonly></label>
       </div>
       <h3>Payment</h3>
-      <div class="form-grid three"><label>Total price (₹)<input name="total" readonly></label><label>Payment received (₹)<input name="paid" type="number" inputmode="decimal" min="0" step="0.01" value="0" required></label><label>Remaining balance (₹)<input name="balance" readonly></label></div>
+      <div class="form-grid four"><label>Payment method<select name="paymentMethod"></select></label><label>Total price (₹)<input name="total" readonly></label><label>Payment received (₹)<input name="paid" type="number" inputmode="decimal" min="0" step="0.01" value="0"></label><label>Remaining balance (₹)<input name="balance" readonly></label></div>
       <label>Remarks<textarea name="remarks" rows="2" maxlength="1600"></textarea></label>
     </div>
     <footer><span id="sale-error" role="status"></span><button type="button" data-close="entry" class="secondary">Cancel</button><button class="primary" id="save-sale">Save sale</button></footer>
