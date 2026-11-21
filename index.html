@@ -733,7 +733,9 @@ function render() {
       return `<div class="bar-item"><div class="bar-area"><span class="bar" style="height:${total / ceiling * 100}%"></span></div><small>${label}</small><strong>${formatMetric(total)}</strong></div>`;
     }).join("")}</div>
   </div>` : '<p class="empty">No sales in this period.</p>';
-  const sources = groupTotals(rows, row => row.channel, amount).sort((a, b) => b[1] - a[1]);
+  const sources = groupTotals(rows, row =>
+    row.channel?.trim().toLowerCase() === "self pickip" ? "Self Pickup" : row.channel, amount)
+    .sort((a, b) => b[1] - a[1]);
   el("sources").innerHTML = sources.length ? sources.map(([channel, total]) => {
     const base = isProductView ? rows.length : gross;
     const share = base ? total / base * 100 : 0;
