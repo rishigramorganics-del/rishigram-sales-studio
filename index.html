@@ -608,21 +608,25 @@ function updateReportFilters() {
 function renderProductTotals(rows) {
   const groups = new Map();
   for (const row of rows) {
-    if (!groups.has(row.product)) groups.set(row.product, { units: new Map(), entries: 0 });
+    if (!groups.has(row.product)) groups.set(row.product, { units: new Map(), entries: 0, total: 0, missing: 0 });
     const group = groups.get(row.product);
     if (row.quantity != null && row.unit) {
       const { unit, micro } = quantityInReport(row.quantity, row.unit);
       group.units.set(unit, (group.units.get(unit) || 0) + micro);
     }
     group.entries += 1;
+    if (row.total == null) group.missing += 1;
+    else group.total += row.total;
   }
   const sorted = [...groups].sort(([a], [b]) => a.localeCompare(b));
   const quantityFormat = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 6 });
   el("product-totals").innerHTML = sorted.length ? `<div class="table-wrap"><table><thead><tr>
-    <th scope="col">Product</th><th scope="col">Quantity sold</th><th scope="col">Item lines</th></tr></thead><tbody>
+    <th scope="col">Product</th><th scope="col">Quantity sold</th><th scope="col">Total sales</th><th scope="col">Item lines</th></tr></thead><tbody>
     ${sorted.map(([name, group]) => `<tr><td><strong>${h(name)}</strong></td><td>
       ${[...group.units].map(([unit, micro]) =>
         `<span class="quantity-label">${quantityFormat.format(micro / 1000000)} ${h(unit)}</span>`).join(" ")}
+    </td><td class="money">${group.missing === group.entries ? "—" : money(group.total)}
+      ${group.missing ? `<small class="muted"> · ${group.missing} without amount</small>` : ""}
     </td><td>${group.entries}</td></tr>`).join("")}</tbody></table></div>`
     : '<p class="empty">No product sales in this period.</p>';
 }
@@ -682,7 +686,17 @@ function render() {
   const productMatches = item => !productFilter.value || item.product === productFilter.value;
   const periodRows = dashboardSales();
   const rows = isProductView ? periodRows.filter(row => saleItems(row).some(productMatches)) : periodRows;
-  if (isProductView) renderProductTotals(rows.flatMap(saleItems).filter(item => item.product && productMatches(item)));
+  if (isProductView) {
+    const productRows = rows.flatMap(sale => {
+      const items = saleItems(sale);
+      return items.filter(item => item.product && productMatches(item)).map(item => ({
+        ...item,
+        total: item.total ?? (items.length === 1 ? sale.total : null)
+          ?? (item.quantity != null && item.unitPrice != null ? lineTotal(item.quantity, item.unitPrice) : null)
+      }));
+    });
+    renderProductTotals(productRows);
+  }
   const gross = rows.reduce((sum, row) => sum + row.total, 0);
   const paid = rows.reduce((sum, row) => sum + row.paid, 0);
   el("gross").textContent = money(gross);
@@ -1339,7 +1353,7 @@ if (configured) {
         <article class="outstanding"><p>Balance due</p><strong id="due">₹0</strong></article>
         <article><p>Sales entries</p><strong id="count">0</strong></article>
       </div>
-      <article id="product-summary" class="panel" hidden><h3>Quantity sold by product</h3><div id="product-totals"></div></article>
+      <article id="product-summary" class="panel" hidden><h3>Sales by product</h3><div id="product-totals"></div></article>
       <div class="analytics"><article class="panel"><h3>Sales trend</h3><p class="muted" id="trend-description">Order value by month</p><div id="trend"></div></article><article class="panel"><h3>Order sources</h3><p class="muted" id="sources-description">Share of recorded sales by value</p><div id="sources"></div></article></div>
       <article id="recent-panel" class="panel"><div class="section-head"><h3>Recent sales</h3><button class="secondary" data-view="sales">View ledger</button></div><div id="recent"></div></article>
     </section>
