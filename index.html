@@ -608,7 +608,7 @@ function updateReportFilters() {
 function renderProductTotals(rows) {
   const groups = new Map();
   for (const row of rows) {
-    if (!groups.has(row.product)) groups.set(row.product, { units: new Map(), entries: 0, total: 0, missing: 0 });
+    if (!groups.has(row.product)) groups.set(row.product, { units: new Map(), entries: 0, total: 0, missing: 0, due: 0, missingDue: 0 });
     const group = groups.get(row.product);
     if (row.quantity != null && row.unit) {
       const { unit, micro } = quantityInReport(row.quantity, row.unit);
@@ -617,16 +617,20 @@ function renderProductTotals(rows) {
     group.entries += 1;
     if (row.total == null) group.missing += 1;
     else group.total += row.total;
+    if (row.due == null) group.missingDue += 1;
+    else group.due += row.due;
   }
   const sorted = [...groups].sort(([a], [b]) => a.localeCompare(b));
   const quantityFormat = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 6 });
   el("product-totals").innerHTML = sorted.length ? `<div class="table-wrap"><table><thead><tr>
-    <th scope="col">Product</th><th scope="col">Quantity sold</th><th scope="col">Total sales</th><th scope="col">Item lines</th></tr></thead><tbody>
+    <th scope="col">Product</th><th scope="col">Quantity sold</th><th scope="col">Total sales</th><th scope="col">Remaining payment</th><th scope="col">Item lines</th></tr></thead><tbody>
     ${sorted.map(([name, group]) => `<tr><td><strong>${h(name)}</strong></td><td>
       ${[...group.units].map(([unit, micro]) =>
         `<span class="quantity-label">${quantityFormat.format(micro / 1000000)} ${h(unit)}</span>`).join(" ")}
     </td><td class="money">${group.missing === group.entries ? "—" : money(group.total)}
       ${group.missing ? `<small class="muted"> · ${group.missing} without amount</small>` : ""}
+    </td><td class="money">${group.missingDue === group.entries ? "—" : money(group.due)}
+      ${group.missingDue ? `<small class="muted"> · ${group.missingDue} without product-level balance</small>` : ""}
     </td><td>${group.entries}</td></tr>`).join("")}</tbody></table></div>`
     : '<p class="empty">No product sales in this period.</p>';
 }
@@ -689,11 +693,19 @@ function render() {
   if (isProductView) {
     const productRows = rows.flatMap(sale => {
       const items = saleItems(sale);
-      return items.filter(item => item.product && productMatches(item)).map(item => ({
-        ...item,
-        total: item.total ?? (items.length === 1 ? sale.total : null)
-          ?? (item.quantity != null && item.unitPrice != null ? lineTotal(item.quantity, item.unitPrice) : null)
-      }));
+      const balance = saleBalance(sale);
+      const singleProduct = items.every(item => item.product && item.product === items[0].product);
+      let balanceAssigned = false;
+      return items.filter(item => item.product && productMatches(item)).map(item => {
+        const total = item.total ?? (items.length === 1 ? sale.total : null)
+          ?? (item.quantity != null && item.unitPrice != null ? lineTotal(item.quantity, item.unitPrice) : null);
+        // A mixed order's partial payment has no stored allocation by product.
+        const due = singleProduct && balance != null
+          ? (balanceAssigned ? 0 : balance)
+          : balance === 0 ? 0 : sale.paid === 0 && balance != null ? total : null;
+        balanceAssigned = true;
+        return { ...item, total, due };
+      });
     });
     renderProductTotals(productRows);
   }
